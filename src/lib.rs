@@ -1,3 +1,13 @@
+// 1. Rename Outersperse to Outerleave or Unzip or something lamer
+// 2. Documentation
+// 3. Code Organization
+//    - Consolidate structs with const generics?
+// 4. Better tests including Loom and Miri
+// 5. Performance optimizations
+//    - Improved Waking functionality (Even should Wake Odd)
+//    - Get rid of Mutex (AtomicBool governs mutual exclusion)
+//    - Improved Ordering variant
+
 use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
