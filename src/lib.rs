@@ -16,8 +16,8 @@ use std::task::{Context, Poll};
 use futures::{ready, Stream};
 use pin_project_lite::pin_project;
 
-pub trait Outersperse {
-    fn outersperse(self) -> (Even<Self>, Odd<Self>)
+pub trait Outerleave {
+    fn outerleave(self) -> (Even<Self>, Odd<Self>)
     where
         Self: Sized;
 }
@@ -85,8 +85,8 @@ impl<S: Stream> Stream for Odd<S> {
     }
 }
 
-impl<S: Stream> Outersperse for S {
-    fn outersperse(self) -> (Even<S>, Odd<S>) {
+impl<S: Stream> Outerleave for S {
+    fn outerleave(self) -> (Even<S>, Odd<S>) {
         let stream = Arc::new(Mutex::new(self));
         let odd_next = Arc::new(AtomicBool::new(false));
         (
@@ -106,9 +106,9 @@ mod tests {
     use futures::{FutureExt, StreamExt};
 
     #[tokio::test]
-    async fn outersperses() {
+    async fn outerleaves() {
         let stream = futures::stream::iter([0, 1, 2, 3, 4, 5, 6]);
-        let (mut evens, mut odds) = stream.outersperse();
+        let (mut evens, mut odds) = stream.outerleave();
 
         assert_eq!(evens.next().await, Some(0));
         assert_eq!(odds.next().await, Some(1));
