@@ -8,7 +8,6 @@
 //    - tokio::test to skip time
 // 4. Performance optimizations
 //    - Get rid of Mutex (AtomicBool governs mutual exclusion)
-//    - Improved Ordering variant
 //    - Improve use of pin_project
 
 use std::pin::Pin;
@@ -52,7 +51,7 @@ impl<S: Stream> Stream for Even<S> {
     fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         let this = self.project();
 
-        let odd_next = this.shared_state.odd_next.load(Ordering::SeqCst);
+        let odd_next = this.shared_state.odd_next.load(Ordering::Acquire);
         if odd_next {
             match &mut this.shared_state.wakers.lock().unwrap().even_waker {
                 Some(waker) => waker.clone_from(cx.waker()),
@@ -61,15 +60,17 @@ impl<S: Stream> Stream for Even<S> {
             return Poll::Pending;
         }
 
-        let inner_stream = &mut *this.shared_state.stream.lock().unwrap();
+        let next_item = {
+            let inner_stream = &mut *this.shared_state.stream.lock().unwrap();
 
-        // SAFETY: This probably isn't actually safe, but I'm hoping the fact that we own this
-        // stream and we maybe promise not to move it is fine. We'll test with MIRI later and still
-        // probably be wrong...
-        let mut inner_stream = unsafe { Pin::new_unchecked(inner_stream) };
-        let next_item = ready!(inner_stream.as_mut().poll_next(cx));
+            // SAFETY: This probably isn't actually safe, but I'm hoping the fact that we own this
+            // stream and we maybe promise not to move it is fine. We'll test with MIRI later and still
+            // probably be wrong...
+            let mut inner_stream = unsafe { Pin::new_unchecked(inner_stream) };
+            ready!(inner_stream.as_mut().poll_next(cx))
+        };
 
-        this.shared_state.odd_next.store(true, Ordering::SeqCst);
+        this.shared_state.odd_next.store(true, Ordering::Release);
         if let Some(waker) = this.shared_state.wakers.lock().unwrap().odd_waker.take() {
             waker.wake();
         }
@@ -82,7 +83,7 @@ impl<S: Stream> Stream for Odd<S> {
     fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         let this = self.project();
 
-        let odd_next = this.shared_state.odd_next.load(Ordering::SeqCst);
+        let odd_next = this.shared_state.odd_next.load(Ordering::Acquire);
         if !odd_next {
             match &mut this.shared_state.wakers.lock().unwrap().odd_waker {
                 Some(waker) => waker.clone_from(cx.waker()),
@@ -91,15 +92,17 @@ impl<S: Stream> Stream for Odd<S> {
             return Poll::Pending;
         }
 
-        let inner_stream = &mut *this.shared_state.stream.lock().unwrap();
+        let next_item = {
+            let inner_stream = &mut *this.shared_state.stream.lock().unwrap();
 
-        // SAFETY: This probably isn't actually safe, but I'm hoping the fact that we own this
-        // stream and we maybe promise not to move it is fine. We'll test with MIRI later and still
-        // probably be wrong...
-        let mut inner_stream = unsafe { Pin::new_unchecked(inner_stream) };
-        let next_item = ready!(inner_stream.as_mut().poll_next(cx));
+            // SAFETY: This probably isn't actually safe, but I'm hoping the fact that we own this
+            // stream and we maybe promise not to move it is fine. We'll test with MIRI later and still
+            // probably be wrong...
+            let mut inner_stream = unsafe { Pin::new_unchecked(inner_stream) };
+            ready!(inner_stream.as_mut().poll_next(cx))
+        };
 
-        this.shared_state.odd_next.store(false, Ordering::SeqCst);
+        this.shared_state.odd_next.store(false, Ordering::Release);
         if let Some(waker) = this.shared_state.wakers.lock().unwrap().even_waker.take() {
             waker.wake();
         }
