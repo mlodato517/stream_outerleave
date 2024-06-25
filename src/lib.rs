@@ -10,7 +10,6 @@
 //    - Get rid of Mutex (AtomicBool governs mutual exclusion)
 //    - Improved Ordering variant
 //    - Improve use of pin_project
-//    - Combine(?) Waker Mutexes
 
 use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -28,8 +27,11 @@ pub trait Outerleave {
 struct SharedState<S> {
     stream: Mutex<S>,
     odd_next: AtomicBool,
-    odd_waker: Mutex<Option<Waker>>,
-    even_waker: Mutex<Option<Waker>>,
+    wakers: Mutex<SharedWakers>,
+}
+struct SharedWakers {
+    odd_waker: Option<Waker>,
+    even_waker: Option<Waker>,
 }
 pin_project! {
     pub struct Even<S> {
@@ -52,7 +54,7 @@ impl<S: Stream> Stream for Even<S> {
 
         let odd_next = this.shared_state.odd_next.load(Ordering::SeqCst);
         if odd_next {
-            match &mut *this.shared_state.even_waker.lock().unwrap() {
+            match &mut this.shared_state.wakers.lock().unwrap().even_waker {
                 Some(waker) => waker.clone_from(cx.waker()),
                 waker @ None => *waker = Some(cx.waker().clone()),
             }
@@ -68,7 +70,7 @@ impl<S: Stream> Stream for Even<S> {
         let next_item = ready!(inner_stream.as_mut().poll_next(cx));
 
         this.shared_state.odd_next.store(true, Ordering::SeqCst);
-        if let Some(waker) = this.shared_state.odd_waker.lock().unwrap().take() {
+        if let Some(waker) = this.shared_state.wakers.lock().unwrap().odd_waker.take() {
             waker.wake();
         }
         Poll::Ready(next_item)
@@ -82,7 +84,7 @@ impl<S: Stream> Stream for Odd<S> {
 
         let odd_next = this.shared_state.odd_next.load(Ordering::SeqCst);
         if !odd_next {
-            match &mut *this.shared_state.odd_waker.lock().unwrap() {
+            match &mut this.shared_state.wakers.lock().unwrap().odd_waker {
                 Some(waker) => waker.clone_from(cx.waker()),
                 waker @ None => *waker = Some(cx.waker().clone()),
             }
@@ -98,7 +100,7 @@ impl<S: Stream> Stream for Odd<S> {
         let next_item = ready!(inner_stream.as_mut().poll_next(cx));
 
         this.shared_state.odd_next.store(false, Ordering::SeqCst);
-        if let Some(waker) = this.shared_state.even_waker.lock().unwrap().take() {
+        if let Some(waker) = this.shared_state.wakers.lock().unwrap().even_waker.take() {
             waker.wake();
         }
         Poll::Ready(next_item)
@@ -110,8 +112,10 @@ impl<S: Stream> Outerleave for S {
         let shared_state = Arc::new(SharedState {
             stream: Mutex::new(self),
             odd_next: AtomicBool::new(false),
-            odd_waker: Mutex::new(None),
-            even_waker: Mutex::new(None),
+            wakers: Mutex::new(SharedWakers {
+                odd_waker: None,
+                even_waker: None,
+            }),
         });
         (
             Even {
