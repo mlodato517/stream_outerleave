@@ -11,7 +11,6 @@
 //    - Improved Ordering variant
 //    - Improve use of pin_project
 //    - Combine(?) Waker Mutexes
-//    - Use Waker::clone_from
 
 use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -53,8 +52,10 @@ impl<S: Stream> Stream for Even<S> {
 
         let odd_next = this.shared_state.odd_next.load(Ordering::SeqCst);
         if odd_next {
-            let mut waker = this.shared_state.even_waker.lock().unwrap();
-            *waker = Some(cx.waker().clone());
+            match &mut *this.shared_state.even_waker.lock().unwrap() {
+                Some(waker) => waker.clone_from(cx.waker()),
+                waker @ None => *waker = Some(cx.waker().clone()),
+            }
             return Poll::Pending;
         }
 
@@ -81,8 +82,10 @@ impl<S: Stream> Stream for Odd<S> {
 
         let odd_next = this.shared_state.odd_next.load(Ordering::SeqCst);
         if !odd_next {
-            let mut waker = this.shared_state.odd_waker.lock().unwrap();
-            *waker = Some(cx.waker().clone());
+            match &mut *this.shared_state.odd_waker.lock().unwrap() {
+                Some(waker) => waker.clone_from(cx.waker()),
+                waker @ None => *waker = Some(cx.waker().clone()),
+            }
             return Poll::Pending;
         }
 
