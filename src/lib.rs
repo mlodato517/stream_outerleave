@@ -1,10 +1,18 @@
-// 2. Documentation
-// 3. Code Organization
+// 1. Documentation
+// 2. Code Organization
 //    - Consolidate structs with const generics? (pin_project doesn't handle this)
-// 4. Better tests including Loom, Miri (can this work with tokio?), and quickcheck or proptest
-// 5. Performance optimizations
+// 3. Better tests
+//    - Loom
+//    - Miri
+//    - Quickcheck/proptest
+//    - tokio::test to skip time
+//    - simple test for original waker bug
+// 4. Performance optimizations
 //    - Get rid of Mutex (AtomicBool governs mutual exclusion)
 //    - Improved Ordering variant
+//    - Improve use of pin_project
+//    - Combine(?) Waker Mutexes
+//    - Use Waker::clone_from
 
 use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, Ordering};
