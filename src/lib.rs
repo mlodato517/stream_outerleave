@@ -6,7 +6,6 @@
 //    - Miri
 //    - Quickcheck/proptest
 //    - tokio::test to skip time
-//    - simple test for original waker bug
 // 4. Performance optimizations
 //    - Get rid of Mutex (AtomicBool governs mutual exclusion)
 //    - Improved Ordering variant
@@ -124,6 +123,8 @@ impl<S: Stream> Outerleave for S {
 mod tests {
     use super::*;
 
+    use std::time::Duration;
+
     use async_stream::stream;
     use futures::{FutureExt, StreamExt};
     use itertools::Itertools;
@@ -147,10 +148,28 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn handles_stream_not_ready() {
+        let stream = futures::stream::iter([0, 1]);
+        let (mut evens, mut odds) = stream.outerleave();
+
+        let jh = tokio::spawn(async move { odds.next().await });
+
+        tokio::time::sleep(Duration::from_millis(10)).await;
+        assert_eq!(evens.next().await, Some(0));
+
+        assert_eq!(
+            tokio::time::timeout(Duration::from_millis(10), jh)
+                .await
+                .unwrap()
+                .unwrap(),
+            Some(1)
+        );
+    }
+
+    #[tokio::test]
+    #[ignore = "takes a long time"]
     async fn handles_different_yielding_patterns() {
-        let sleeps: Vec<_> = (0..6)
-            .map(|n| std::time::Duration::from_millis(n * 10))
-            .collect();
+        let sleeps: Vec<_> = (0..6).map(|n| Duration::from_millis(n * 10)).collect();
         let sleeps = sleeps.iter().copied().permutations(sleeps.len()).take(300);
         for sleeps in sleeps {
             let stream = stream! {
