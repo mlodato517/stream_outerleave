@@ -3,7 +3,6 @@
 //    - Consolidate structs with const generics? (pin_project doesn't handle this)
 // 3. Better tests
 //    - Loom
-//    - Miri
 //    - Quickcheck/proptest
 //    - tokio::test to skip time
 // 4. Performance optimizations
@@ -136,69 +135,85 @@ mod tests {
     use std::time::Duration;
 
     use async_stream::stream;
-    use futures::{FutureExt, StreamExt};
+    use futures::{Future, FutureExt, StreamExt};
     use itertools::Itertools;
 
-    #[tokio::test]
-    async fn outerleaves() {
-        let stream = futures::stream::iter([0, 1, 2, 3, 4, 5, 6]);
-        let (mut evens, mut odds) = stream.outerleave();
+    // See https://github.com/rust-lang/miri/issues/602#issuecomment-884019764
+    fn miri_test(f: impl Future<Output = ()>) {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_time()
+            .build()
+            .unwrap();
 
-        assert_eq!(evens.next().await, Some(0));
-        assert_eq!(odds.next().await, Some(1));
-        assert_eq!(evens.next().await, Some(2));
+        rt.block_on(f)
+    }
 
-        assert_eq!(evens.next().now_or_never(), None);
+    #[test]
+    fn outerleaves() {
+        miri_test(async move {
+            let stream = futures::stream::iter([0, 1, 2, 3, 4, 5, 6]);
+            let (mut evens, mut odds) = stream.outerleave();
 
-        let jh = tokio::spawn(async move {
-            assert_eq!(evens.next().await, Some(4));
+            assert_eq!(evens.next().await, Some(0));
+            assert_eq!(odds.next().await, Some(1));
+            assert_eq!(evens.next().await, Some(2));
+
+            assert_eq!(evens.next().now_or_never(), None);
+
+            let jh = tokio::spawn(async move {
+                assert_eq!(evens.next().await, Some(4));
+            });
+            assert_eq!(odds.next().await, Some(3));
+            jh.await.unwrap();
         });
-        assert_eq!(odds.next().await, Some(3));
-        jh.await.unwrap();
     }
 
-    #[tokio::test]
-    async fn handles_stream_not_ready() {
-        let stream = futures::stream::iter([0, 1]);
-        let (mut evens, mut odds) = stream.outerleave();
+    #[test]
+    fn handles_stream_not_ready() {
+        miri_test(async move {
+            let stream = futures::stream::iter([0, 1]);
+            let (mut evens, mut odds) = stream.outerleave();
 
-        let jh = tokio::spawn(async move { odds.next().await });
+            let jh = tokio::spawn(async move { odds.next().await });
 
-        tokio::time::sleep(Duration::from_millis(10)).await;
-        assert_eq!(evens.next().await, Some(0));
+            tokio::time::sleep(Duration::from_millis(10)).await;
+            assert_eq!(evens.next().await, Some(0));
 
-        assert_eq!(
-            tokio::time::timeout(Duration::from_millis(10), jh)
-                .await
-                .unwrap()
-                .unwrap(),
-            Some(1)
-        );
+            assert_eq!(
+                tokio::time::timeout(Duration::from_millis(10), jh)
+                    .await
+                    .unwrap()
+                    .unwrap(),
+                Some(1)
+            );
+        })
     }
 
-    #[tokio::test]
+    #[test]
     #[ignore = "takes a long time"]
-    async fn handles_different_yielding_patterns() {
-        let sleeps: Vec<_> = (0..6).map(|n| Duration::from_millis(n * 10)).collect();
-        let sleeps = sleeps.iter().copied().permutations(sleeps.len()).take(300);
-        for sleeps in sleeps {
-            let stream = stream! {
-                for (i, sleep) in (0..6).zip(sleeps) {
-                    tokio::time::sleep(sleep).await;
-                    yield Ok(i);
-                }
-            };
+    fn handles_different_yielding_patterns() {
+        miri_test(async move {
+            let sleeps: Vec<_> = (0..6).map(|n| Duration::from_millis(n * 10)).collect();
+            let sleeps = sleeps.iter().copied().permutations(sleeps.len()).take(300);
+            for sleeps in sleeps {
+                let stream = stream! {
+                    for (i, sleep) in (0..6).zip(sleeps) {
+                        tokio::time::sleep(sleep).await;
+                        yield Ok(i);
+                    }
+                };
 
-            let (evens, odds) = stream.outerleave();
-            let (tx, rx) = futures::channel::mpsc::unbounded();
-            let even_fut = evens.forward(tx.clone());
-            let odd_fut = odds.forward(tx);
-            let (even_result, odd_result) = futures::join!(even_fut, odd_fut);
-            even_result.unwrap();
-            odd_result.unwrap();
+                let (evens, odds) = stream.outerleave();
+                let (tx, rx) = futures::channel::mpsc::unbounded();
+                let even_fut = evens.forward(tx.clone());
+                let odd_fut = odds.forward(tx);
+                let (even_result, odd_result) = futures::join!(even_fut, odd_fut);
+                even_result.unwrap();
+                odd_result.unwrap();
 
-            let received: Vec<_> = rx.collect().await;
-            assert_eq!(received, [0, 1, 2, 3, 4, 5]);
-        }
+                let received: Vec<_> = rx.collect().await;
+                assert_eq!(received, [0, 1, 2, 3, 4, 5]);
+            }
+        });
     }
 }
