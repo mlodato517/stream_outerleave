@@ -190,14 +190,13 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "takes a long time"]
     fn handles_different_yielding_patterns() {
         miri_test(async move {
-            let sleeps: Vec<_> = (0..6).map(|n| Duration::from_millis(n * 10)).collect();
-            let sleeps = sleeps.iter().copied().permutations(sleeps.len()).take(300);
+            let sleeps: Vec<_> = (0..4).map(|n| Duration::from_millis(n * 10)).collect();
+            let sleeps = sleeps.iter().copied().permutations(sleeps.len());
             for sleeps in sleeps {
                 let stream = stream! {
-                    for (i, sleep) in (0..6).zip(sleeps) {
+                    for (i, sleep) in sleeps.into_iter().enumerate() {
                         tokio::time::sleep(sleep).await;
                         yield Ok(i);
                     }
@@ -212,7 +211,7 @@ mod tests {
                 odd_result.unwrap();
 
                 let received: Vec<_> = rx.collect().await;
-                assert_eq!(received, [0, 1, 2, 3, 4, 5]);
+                assert_eq!(received, [0, 1, 2, 3]);
             }
         });
     }
