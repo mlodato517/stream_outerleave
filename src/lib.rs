@@ -6,9 +6,9 @@
 //    - Quickcheck/proptest
 //    - tokio::test to skip time
 // 4. Performance optimizations
-//    - Get rid of Mutex (AtomicBool governs mutual exclusion)
 //    - Improve use of pin_project
 
+use std::cell::UnsafeCell;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -22,8 +22,14 @@ pub trait Outerleave {
     where
         Self: Sized;
 }
+
+// SAFETY: The only issue here is `UnsafeCell` which is not `Sync`. But since we the `odd_next`
+// bool controls mutual exclusion of the value, we'll never derefence the pointer on two threads at
+// the same time. This is similar to, for example,
+// https://marabos.nl/atomics/building-spinlock.html#an-unsafe-spin-lock.
+unsafe impl<S: Send> Sync for SharedState<S> {}
 struct SharedState<S> {
-    stream: Mutex<S>,
+    stream: UnsafeCell<S>,
     odd_next: AtomicBool,
     wakers: Mutex<SharedWakers>,
 }
@@ -60,11 +66,10 @@ impl<S: Stream> Stream for Even<S> {
         }
 
         let next_item = {
-            let inner_stream = &mut *this.shared_state.stream.lock().unwrap();
+            // SAFETY: `odd_next` ensures we aren't concurrently doing this on the other stream.
+            let inner_stream = unsafe { &mut *this.shared_state.stream.get() };
 
-            // SAFETY: This probably isn't actually safe, but I'm hoping the fact that we own this
-            // stream and we maybe promise not to move it is fine. We'll test with MIRI later and still
-            // probably be wrong...
+            // SAFETY: We don't have any semantic moves on this value.
             let mut inner_stream = unsafe { Pin::new_unchecked(inner_stream) };
             ready!(inner_stream.as_mut().poll_next(cx))
         };
@@ -92,11 +97,10 @@ impl<S: Stream> Stream for Odd<S> {
         }
 
         let next_item = {
-            let inner_stream = &mut *this.shared_state.stream.lock().unwrap();
+            // SAFETY: `odd_next` ensures we aren't concurrently doing this on the other stream.
+            let inner_stream = unsafe { &mut *this.shared_state.stream.get() };
 
-            // SAFETY: This probably isn't actually safe, but I'm hoping the fact that we own this
-            // stream and we maybe promise not to move it is fine. We'll test with MIRI later and still
-            // probably be wrong...
+            // SAFETY: We don't have any semantic moves on this value.
             let mut inner_stream = unsafe { Pin::new_unchecked(inner_stream) };
             ready!(inner_stream.as_mut().poll_next(cx))
         };
@@ -112,7 +116,7 @@ impl<S: Stream> Stream for Odd<S> {
 impl<S: Stream> Outerleave for S {
     fn outerleave(self) -> (Even<S>, Odd<S>) {
         let shared_state = Arc::new(SharedState {
-            stream: Mutex::new(self),
+            stream: UnsafeCell::new(self),
             odd_next: AtomicBool::new(false),
             wakers: Mutex::new(SharedWakers {
                 odd_waker: None,
