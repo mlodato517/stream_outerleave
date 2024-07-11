@@ -23,9 +23,9 @@ pub trait Outerleave {
         Self: Sized;
 }
 
-// SAFETY: The only issue here is `UnsafeCell` which is not `Sync`. But since we the `odd_next`
-// bool controls mutual exclusion of the value, we'll never derefence the pointer on two threads at
-// the same time. This is similar to, for example,
+// SAFETY: The only issue here is `UnsafeCell` which is not `Sync`. But since the `odd_next` bool
+// controls mutual exclusion of the value, we'll never derefence the pointer on two threads at the
+// same time. This is similar to, for example,
 // https://marabos.nl/atomics/building-spinlock.html#an-unsafe-spin-lock.
 unsafe impl<S: Send> Sync for SharedState<S> {}
 struct SharedState<S> {
