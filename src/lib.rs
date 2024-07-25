@@ -65,7 +65,14 @@ impl<S: Stream> Stream for Even<S> {
                 Some(waker) => waker.clone_from(cx.waker()),
                 waker @ None => *waker = Some(cx.waker().clone()),
             }
-            return Poll::Pending;
+
+            // Check again -- it's possible that the other half updated the bool and woke the Waker
+            // before we stored it. If that's the case, we won't be woken, but we can proceed
+            // immediately. See <https://docs.rs/futures/latest/futures/task/struct.AtomicWaker.html#examples>.
+            let odd_next = this.shared_state.odd_next.load(Ordering::Acquire);
+            if odd_next {
+                return Poll::Pending;
+            }
         }
 
         let next_item = {
@@ -99,7 +106,14 @@ impl<S: Stream> Stream for Odd<S> {
                 Some(waker) => waker.clone_from(cx.waker()),
                 waker @ None => *waker = Some(cx.waker().clone()),
             }
-            return Poll::Pending;
+
+            // Check again -- it's possible that the other half updated the bool and woke the Waker
+            // before we stored it. If that's the case, we won't be woken, but we can proceed
+            // immediately. See <https://docs.rs/futures/latest/futures/task/struct.AtomicWaker.html#examples>.
+            let odd_next = this.shared_state.odd_next.load(Ordering::Acquire);
+            if !odd_next {
+                return Poll::Pending;
+            }
         }
 
         let next_item = {
