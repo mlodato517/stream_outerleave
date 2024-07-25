@@ -8,14 +8,15 @@
 //    - Improve use of pin_project
 
 use std::pin::Pin;
-use std::task::{Context, Poll, Waker};
+use std::task::{Context, Poll};
 
+use futures::task::AtomicWaker;
 use futures::{ready, Stream};
 use pin_project_lite::pin_project;
 
 use crate::cell::UnsafeCell;
 use crate::sync::atomic::{AtomicBool, Ordering};
-use crate::sync::{Arc, Mutex};
+use crate::sync::Arc;
 
 mod cell;
 mod sync;
@@ -34,11 +35,8 @@ unsafe impl<S: Send> Sync for SharedState<S> {}
 struct SharedState<S> {
     stream: UnsafeCell<S>,
     odd_next: AtomicBool,
-    wakers: Mutex<SharedWakers>,
-}
-struct SharedWakers {
-    odd_waker: Option<Waker>,
-    even_waker: Option<Waker>,
+    odd_waker: AtomicWaker,
+    even_waker: AtomicWaker,
 }
 pin_project! {
     pub struct Even<S> {
@@ -61,10 +59,7 @@ impl<S: Stream> Stream for Even<S> {
 
         let odd_next = this.shared_state.odd_next.load(Ordering::Acquire);
         if odd_next {
-            match &mut this.shared_state.wakers.lock().unwrap().even_waker {
-                Some(waker) => waker.clone_from(cx.waker()),
-                waker @ None => *waker = Some(cx.waker().clone()),
-            }
+            this.shared_state.even_waker.register(cx.waker());
 
             // Check again -- it's possible that the other half updated the bool and woke the Waker
             // before we stored it. If that's the case, we won't be woken, but we can proceed
@@ -88,9 +83,7 @@ impl<S: Stream> Stream for Even<S> {
         };
 
         this.shared_state.odd_next.store(true, Ordering::Release);
-        if let Some(waker) = this.shared_state.wakers.lock().unwrap().odd_waker.take() {
-            waker.wake();
-        }
+        this.shared_state.odd_waker.wake();
         Poll::Ready(next_item)
     }
 }
@@ -102,10 +95,7 @@ impl<S: Stream> Stream for Odd<S> {
 
         let odd_next = this.shared_state.odd_next.load(Ordering::Acquire);
         if !odd_next {
-            match &mut this.shared_state.wakers.lock().unwrap().odd_waker {
-                Some(waker) => waker.clone_from(cx.waker()),
-                waker @ None => *waker = Some(cx.waker().clone()),
-            }
+            this.shared_state.odd_waker.register(cx.waker());
 
             // Check again -- it's possible that the other half updated the bool and woke the Waker
             // before we stored it. If that's the case, we won't be woken, but we can proceed
@@ -129,9 +119,7 @@ impl<S: Stream> Stream for Odd<S> {
         };
 
         this.shared_state.odd_next.store(false, Ordering::Release);
-        if let Some(waker) = this.shared_state.wakers.lock().unwrap().even_waker.take() {
-            waker.wake();
-        }
+        this.shared_state.even_waker.wake();
         Poll::Ready(next_item)
     }
 }
@@ -141,10 +129,8 @@ impl<S: Stream> Outerleave for S {
         let shared_state = Arc::new(SharedState {
             stream: UnsafeCell::new(self),
             odd_next: AtomicBool::new(false),
-            wakers: Mutex::new(SharedWakers {
-                odd_waker: None,
-                even_waker: None,
-            }),
+            odd_waker: AtomicWaker::new(),
+            even_waker: AtomicWaker::new(),
         });
         (
             Even {

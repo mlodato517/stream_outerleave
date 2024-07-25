@@ -5,7 +5,7 @@ pub(crate) mod atomic {
     pub(crate) use loom::sync::atomic::{AtomicBool, Ordering};
 }
 #[cfg(loom)]
-pub(crate) use loom::sync::{Arc, Mutex};
+pub(crate) use loom::sync::Arc;
 
 #[cfg(not(loom))]
 pub(crate) mod atomic {
@@ -13,4 +13,4 @@ pub(crate) mod atomic {
 }
 
 #[cfg(not(loom))]
-pub(crate) use std::sync::{Arc, Mutex};
+pub(crate) use std::sync::Arc;
