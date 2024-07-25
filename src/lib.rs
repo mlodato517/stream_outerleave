@@ -2,20 +2,23 @@
 // 2. Code Organization
 //    - Consolidate structs with const generics? (pin_project doesn't handle this)
 // 3. Better tests
-//    - Loom
 //    - Quickcheck/proptest
 //    - tokio::test to skip time
 // 4. Performance optimizations
 //    - Improve use of pin_project
 
-use std::cell::UnsafeCell;
 use std::pin::Pin;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll, Waker};
 
 use futures::{ready, Stream};
 use pin_project_lite::pin_project;
+
+use crate::cell::UnsafeCell;
+use crate::sync::atomic::{AtomicBool, Ordering};
+use crate::sync::{Arc, Mutex};
+
+mod cell;
+mod sync;
 
 pub trait Outerleave {
     fn outerleave(self) -> (Even<Self>, Odd<Self>)
@@ -67,11 +70,14 @@ impl<S: Stream> Stream for Even<S> {
 
         let next_item = {
             // SAFETY: `odd_next` ensures we aren't concurrently doing this on the other stream.
-            let inner_stream = unsafe { &mut *this.shared_state.stream.get() };
+            let inner_result = this.shared_state.stream.with_mut(|stream_ptr| {
+                let inner_stream = unsafe { &mut *stream_ptr };
 
-            // SAFETY: We don't have any semantic moves on this value.
-            let mut inner_stream = unsafe { Pin::new_unchecked(inner_stream) };
-            ready!(inner_stream.as_mut().poll_next(cx))
+                // SAFETY: We don't have any semantic moves on this value.
+                let mut inner_stream = unsafe { Pin::new_unchecked(inner_stream) };
+                inner_stream.as_mut().poll_next(cx)
+            });
+            ready!(inner_result)
         };
 
         this.shared_state.odd_next.store(true, Ordering::Release);
@@ -98,11 +104,14 @@ impl<S: Stream> Stream for Odd<S> {
 
         let next_item = {
             // SAFETY: `odd_next` ensures we aren't concurrently doing this on the other stream.
-            let inner_stream = unsafe { &mut *this.shared_state.stream.get() };
+            let inner_result = this.shared_state.stream.with_mut(|stream_ptr| {
+                let inner_stream = unsafe { &mut *stream_ptr };
 
-            // SAFETY: We don't have any semantic moves on this value.
-            let mut inner_stream = unsafe { Pin::new_unchecked(inner_stream) };
-            ready!(inner_stream.as_mut().poll_next(cx))
+                // SAFETY: We don't have any semantic moves on this value.
+                let mut inner_stream = unsafe { Pin::new_unchecked(inner_stream) };
+                inner_stream.as_mut().poll_next(cx)
+            });
+            ready!(inner_result)
         };
 
         this.shared_state.odd_next.store(false, Ordering::Release);
@@ -132,7 +141,7 @@ impl<S: Stream> Outerleave for S {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(loom)))]
 mod tests {
     use super::*;
 
@@ -217,6 +226,40 @@ mod tests {
                 let received: Vec<_> = rx.collect().await;
                 assert_eq!(received, [0, 1, 2, 3]);
             }
+        });
+    }
+}
+
+#[cfg(all(loom, test))]
+mod tests {
+    use super::*;
+
+    use futures::{Future, StreamExt};
+
+    #[test]
+    fn handles_stale_wakers() {
+        loom::model(|| {
+            struct NoopWaker;
+            impl std::task::Wake for NoopWaker {
+                fn wake(self: std::sync::Arc<Self>) {}
+            }
+            let stream = futures::stream::iter([0, 1]);
+            let (mut evens, mut odds) = stream.outerleave();
+
+            let jh = loom::thread::spawn(move || {
+                // Not using loom Arc so we can create a `Waker`
+                let waker = std::sync::Arc::new(NoopWaker).into();
+                let mut context = Context::from_waker(&waker);
+                let next_even = std::pin::pin!(evens.next());
+                let _ = next_even.poll(&mut context);
+            });
+
+            let mut spawned_odd = tokio_test::task::spawn(odds.next());
+            let next_odd = spawned_odd.enter(|cx, task| task.poll(cx));
+
+            jh.join().unwrap();
+
+            assert!(spawned_odd.is_woken() || next_odd == Poll::Ready(Some(1)));
         });
     }
 }
