@@ -4,15 +4,12 @@
 // 3. Better tests
 //    - Quickcheck/proptest
 //    - tokio::test to skip time
-// 4. Performance optimizations
-//    - Improve use of pin_project
 
 use std::pin::Pin;
 use std::task::{Context, Poll};
 
 use futures::task::AtomicWaker;
 use futures::{ready, Stream};
-use pin_project_lite::pin_project;
 
 use crate::cell::UnsafeCell;
 use crate::sync::atomic::{AtomicBool, Ordering};
@@ -38,33 +35,25 @@ struct SharedState<S> {
     odd_waker: AtomicWaker,
     even_waker: AtomicWaker,
 }
-pin_project! {
-    pub struct Even<S> {
-        #[pin]
-        shared_state: Arc<SharedState<S>>,
-    }
+pub struct Even<S> {
+    shared_state: Arc<SharedState<S>>,
 }
-pin_project! {
-    pub struct Odd<S> {
-        #[pin]
-        shared_state: Arc<SharedState<S>>,
-    }
+pub struct Odd<S> {
+    shared_state: Arc<SharedState<S>>,
 }
 
 impl<S: Stream> Stream for Even<S> {
     type Item = S::Item;
 
     fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
-        let this = self.project();
-
-        let odd_next = this.shared_state.odd_next.load(Ordering::Acquire);
+        let odd_next = self.shared_state.odd_next.load(Ordering::Acquire);
         if odd_next {
-            this.shared_state.even_waker.register(cx.waker());
+            self.shared_state.even_waker.register(cx.waker());
 
             // Check again -- it's possible that the other half updated the bool and woke the Waker
             // before we stored it. If that's the case, we won't be woken, but we can proceed
             // immediately. See <https://docs.rs/futures/latest/futures/task/struct.AtomicWaker.html#examples>.
-            let odd_next = this.shared_state.odd_next.load(Ordering::Acquire);
+            let odd_next = self.shared_state.odd_next.load(Ordering::Acquire);
             if odd_next {
                 return Poll::Pending;
             }
@@ -72,7 +61,7 @@ impl<S: Stream> Stream for Even<S> {
 
         let next_item = {
             // SAFETY: `odd_next` ensures we aren't concurrently doing this on the other stream.
-            let inner_result = this.shared_state.stream.with_mut(|stream_ptr| {
+            let inner_result = self.shared_state.stream.with_mut(|stream_ptr| {
                 let inner_stream = unsafe { &mut *stream_ptr };
 
                 // SAFETY: We don't have any semantic moves on this value.
@@ -82,8 +71,8 @@ impl<S: Stream> Stream for Even<S> {
             ready!(inner_result)
         };
 
-        this.shared_state.odd_next.store(true, Ordering::Release);
-        this.shared_state.odd_waker.wake();
+        self.shared_state.odd_next.store(true, Ordering::Release);
+        self.shared_state.odd_waker.wake();
         Poll::Ready(next_item)
     }
 }
@@ -91,16 +80,14 @@ impl<S: Stream> Stream for Odd<S> {
     type Item = S::Item;
 
     fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
-        let this = self.project();
-
-        let odd_next = this.shared_state.odd_next.load(Ordering::Acquire);
+        let odd_next = self.shared_state.odd_next.load(Ordering::Acquire);
         if !odd_next {
-            this.shared_state.odd_waker.register(cx.waker());
+            self.shared_state.odd_waker.register(cx.waker());
 
             // Check again -- it's possible that the other half updated the bool and woke the Waker
             // before we stored it. If that's the case, we won't be woken, but we can proceed
             // immediately. See <https://docs.rs/futures/latest/futures/task/struct.AtomicWaker.html#examples>.
-            let odd_next = this.shared_state.odd_next.load(Ordering::Acquire);
+            let odd_next = self.shared_state.odd_next.load(Ordering::Acquire);
             if !odd_next {
                 return Poll::Pending;
             }
@@ -108,7 +95,7 @@ impl<S: Stream> Stream for Odd<S> {
 
         let next_item = {
             // SAFETY: `odd_next` ensures we aren't concurrently doing this on the other stream.
-            let inner_result = this.shared_state.stream.with_mut(|stream_ptr| {
+            let inner_result = self.shared_state.stream.with_mut(|stream_ptr| {
                 let inner_stream = unsafe { &mut *stream_ptr };
 
                 // SAFETY: We don't have any semantic moves on this value.
@@ -118,8 +105,8 @@ impl<S: Stream> Stream for Odd<S> {
             ready!(inner_result)
         };
 
-        this.shared_state.odd_next.store(false, Ordering::Release);
-        this.shared_state.even_waker.wake();
+        self.shared_state.odd_next.store(false, Ordering::Release);
+        self.shared_state.even_waker.wake();
         Poll::Ready(next_item)
     }
 }

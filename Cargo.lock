@@ -821,7 +821,6 @@ dependencies = [
  "futures",
  "itertools 0.13.0",
  "loom",
- "pin-project-lite",
  "tokio",
  "tokio-test",
 ]
