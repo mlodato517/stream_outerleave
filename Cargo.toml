@@ -19,3 +19,7 @@ tokio-test = "0.4"
 [[bench]]
 name = "benchmark"
 harness = false
+
+# Using a cfg is currently recommended by the `loom` docs.
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(loom)'] }
