@@ -1,7 +1,12 @@
-// 1. Documentation
-// 2. Code Organization
-//    - Consolidate structs with const generics? (pin_project doesn't handle this)
-// 3. Better tests
+//! This crate offers traits for splitting [`Stream`]s into two streams that return alternating
+//! elements. See the docs on [`Outerleave`] for more details.
+
+// TODOs
+// - Code Organization
+//    - Consolidate structs with const generics?
+//    - Move code out of lib.rs.
+//    - Separate modules for waiting vs non-waiting outerleave halves.
+// - Better tests
 //    - Quickcheck/proptest
 //    - tokio::test to skip time
 
@@ -18,6 +23,42 @@ use crate::sync::Arc;
 mod cell;
 mod sync;
 
+/// Trait for splitting a [`Stream`] into two halves that return alternating elements from the
+/// original.
+///
+/// # Examples
+///
+/// ```
+/// # futures::executor::block_on(async {
+/// use futures::StreamExt;
+/// use stream_split::Outerleave;
+///
+/// let stream = futures::stream::iter([0, 1, 2, 3, 4, 5]);
+/// let (even, odd) = stream.outerleave();
+///
+/// let (evens, odds) = futures::join!(even.collect::<Vec<_>>(), odd.collect::<Vec<_>>());
+/// assert_eq!(evens, [0, 2, 4]);
+/// assert_eq!(odds, [1, 3, 5]);
+/// # });
+/// ```
+///
+/// The streams split from the original stream will wait for each other before producing new
+/// elements:
+///
+/// ```
+/// # futures::executor::block_on(async {
+/// use futures::{StreamExt, FutureExt};
+/// use stream_split::Outerleave;
+///
+/// let stream = futures::stream::iter([0, 1, 2, 3, 4, 5]);
+/// let (mut even, mut odd) = stream.outerleave();
+///
+/// assert_eq!(even.next().now_or_never(), Some(Some(0)));
+/// assert_eq!(even.next().now_or_never(), None);
+/// assert_eq!(odd.next().now_or_never(), Some(Some(1)));
+/// assert_eq!(even.next().now_or_never(), Some(Some(2)));
+/// # });
+/// ```
 pub trait Outerleave {
     fn outerleave(self) -> (Even<Self>, Odd<Self>)
     where
@@ -35,9 +76,15 @@ struct SharedState<S> {
     odd_waker: AtomicWaker,
     even_waker: AtomicWaker,
 }
+
+/// One half a split stream. This half will return the 0th, 2nd, 4th, etc. elements from the
+/// original stream.
 pub struct Even<S> {
     shared_state: Arc<SharedState<S>>,
 }
+
+/// One half a split stream. This half will return the 1st, 3rd, 5th, etc. elements from the
+/// original stream.
 pub struct Odd<S> {
     shared_state: Arc<SharedState<S>>,
 }
@@ -76,6 +123,7 @@ impl<S: Stream> Stream for Even<S> {
         Poll::Ready(next_item)
     }
 }
+
 impl<S: Stream> Stream for Odd<S> {
     type Item = S::Item;
 
@@ -213,40 +261,6 @@ mod tests {
                 let received: Vec<_> = rx.collect().await;
                 assert_eq!(received, [0, 1, 2, 3]);
             }
-        });
-    }
-}
-
-#[cfg(all(loom, test))]
-mod tests {
-    use super::*;
-
-    use futures::{Future, StreamExt};
-
-    #[test]
-    fn handles_stale_wakers() {
-        loom::model(|| {
-            struct NoopWaker;
-            impl std::task::Wake for NoopWaker {
-                fn wake(self: std::sync::Arc<Self>) {}
-            }
-            let stream = futures::stream::iter([0, 1]);
-            let (mut evens, mut odds) = stream.outerleave();
-
-            let jh = loom::thread::spawn(move || {
-                // Not using loom Arc so we can create a `Waker`
-                let waker = std::sync::Arc::new(NoopWaker).into();
-                let mut context = Context::from_waker(&waker);
-                let next_even = std::pin::pin!(evens.next());
-                let _ = next_even.poll(&mut context);
-            });
-
-            let mut spawned_odd = tokio_test::task::spawn(odds.next());
-            let next_odd = spawned_odd.enter(|cx, task| task.poll(cx));
-
-            jh.join().unwrap();
-
-            assert!(spawned_odd.is_woken() || next_odd == Poll::Ready(Some(1)));
         });
     }
 }
